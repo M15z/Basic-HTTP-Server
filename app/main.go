@@ -62,6 +62,8 @@ func hundleConnection(conn net.Conn) {
 		os.Exit(1)
 	}
 
+	fmt.Println("RAW PATH:", extractPath(req)) // debug line
+
 	if str, ok := isEcho(req); ok {
 		conn.Write(buildEchoResponse(str))
 	} else if isRootPath(req) {
