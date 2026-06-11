@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 const (
@@ -28,6 +29,30 @@ func isRootPath(req []byte) bool {
 	return len(req) > 5 && req[4] == '/' && req[5] == ' '
 }
 
+func extractPath(req []byte) string {
+	line := strings.Split(string(req), "\r\n")[0]
+	parts := strings.Split(line, " ")
+
+	if len(parts) < 0 {
+		return ""
+	}
+
+	return parts[0]
+}
+
+func isEcho(req []byte) (string, bool) {
+	path := extractPath(req)
+	if strings.HasPrefix(path, "/echo/") {
+		return strings.TrimPrefix(path, "/echo/"), true
+	}
+	return "", false
+}
+
+func buildEchoResponse(body string) []byte {
+	response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	return []byte(response)
+}
+
 func hundleConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -39,6 +64,8 @@ func hundleConnection(conn net.Conn) {
 
 	if isRootPath(req) {
 		conn.Write(response200)
+	} else if str, ok := isEcho(req); ok {
+		conn.Write(buildEchoResponse(str))
 	} else {
 		conn.Write(response404)
 	}
