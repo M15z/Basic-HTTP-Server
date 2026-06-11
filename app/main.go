@@ -62,11 +62,10 @@ func hundleConnection(conn net.Conn) {
 		os.Exit(1)
 	}
 
-	if isRootPath(req) {
-		conn.Write(response200)
-	} else if str, ok := isEcho(req); ok {
-		conn.Write(response200)
+	if str, ok := isEcho(req); ok {
 		conn.Write(buildEchoResponse(str))
+	} else if isRootPath(req) {
+		conn.Write(response200)
 	} else {
 		conn.Write(response404)
 	}
