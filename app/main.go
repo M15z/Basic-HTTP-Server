@@ -30,14 +30,25 @@ func isRootPath(req []byte) bool {
 }
 
 func extractPath(req []byte) string {
-	line := strings.Split(string(req), "\r\n")[0]
-	parts := strings.Split(line, " ")
+	reqString := string(req)
+	lastLine := strings.Index(reqString, "\r\n")
+	if lastLine == -1 {
+		lastLine = strings.Index(reqString, "\n")
+	}
 
-	if len(parts) < 0 {
+	if lastLine == -1 {
 		return ""
 	}
 
-	return parts[0]
+	line := reqString[:lastLine]
+	// "GET /echo/strawberry HTTP/1.1"
+	parts := strings.Fields(line)
+
+	if len(parts) < 2 {
+		return ""
+	}
+
+	return parts[1]
 }
 
 func isEcho(req []byte) (string, bool) {
