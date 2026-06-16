@@ -7,6 +7,14 @@ import (
 	"strings"
 )
 
+type Request struct {
+	Method  string
+	Path    string
+	Version string
+	Headers map[string]string
+	Body    string
+}
+
 const (
 	host       = "0.0.0.0:4221"
 	bufferSize = 1024
@@ -29,37 +37,54 @@ func isRootPath(req []byte) bool {
 	return len(req) > 5 && req[4] == '/' && req[5] == ' '
 }
 
-func extractPath(req []byte) string {
-	reqString := string(req)
-	lastLine := strings.Index(reqString, "\r\n")
-	if lastLine == -1 {
-		lastLine = strings.Index(reqString, "\n")
+func requestParse(req []byte) Request {
+	reqString := strings.TrimRight(string(req), "\x00")
+	section := strings.Split(reqString, "\r\n")
+
+	// Parse request line: "GET /path HTTP/1.1"
+	requestLine := strings.Fields(section[0])
+	r := Request{
+		Method:  requestLine[0],
+		Path:    requestLine[1],
+		Version: requestLine[2],
+		Headers: make(map[string]string),
 	}
 
-	if lastLine == -1 {
-		return ""
+	// Parse Header
+	i := 1
+	for i < len(section) && section[i] != "" {
+		parts := strings.SplitN(section[i], ": ", 2)
+		if len(parts) == 2 {
+			r.Headers[parts[0]] = parts[1]
+		}
+
+		i++
 	}
 
-	line := reqString[:lastLine]
-	// "GET /echo/strawberry HTTP/1.1"
-	parts := strings.Fields(line)
-
-	if len(parts) < 2 {
-		return ""
+	// Everything after the empty line is the body
+	if i+1 < len(section) {
+		r.Body = strings.Join(section[i+1:], "\r\n")
 	}
 
-	return parts[1]
+	return r
+
 }
 
 func isEcho(req []byte) (string, bool) {
-	path := extractPath(req)
+	path := requestParse(req).Path
 	if strings.HasPrefix(path, "/echo/") {
 		return strings.TrimPrefix(path, "/echo/"), true
 	}
 	return "", false
 }
 
-func buildEchoResponse(body string) []byte {
+func isUserAgent(req []byte) (string, bool) {
+	r := requestParse(req)
+	userAgent, ok := r.Headers["User-Agent"]
+	return userAgent, ok
+}
+
+func buildResponse(body string) []byte {
 	response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
 	return []byte(response)
 }
@@ -73,10 +98,10 @@ func hundleConnection(conn net.Conn) {
 		os.Exit(1)
 	}
 
-	fmt.Println("RAW PATH:", extractPath(req)) // debug line
-
 	if str, ok := isEcho(req); ok {
-		conn.Write(buildEchoResponse(str))
+		conn.Write(buildResponse(str))
+	} else if str, ok := isUserAgent(req); ok {
+		conn.Write(buildResponse(str))
 	} else if isRootPath(req) {
 		conn.Write(response200)
 	} else {
