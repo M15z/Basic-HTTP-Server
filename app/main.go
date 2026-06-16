@@ -84,6 +84,28 @@ func isUserAgent(req []byte) (string, bool) {
 	return userAgent, ok
 }
 
+func isFile(req []byte) (string, bool) {
+	path := requestParse(req).Path
+	if strings.HasPrefix(path, "/files/") {
+		return strings.TrimPrefix(path, "/files/"), true
+	}
+	return "", false
+}
+
+func buildFileResponse(filename string) []byte {
+	directory := os.Args[2] // assuming you pass --directory flag like the challenge expects
+	contents, err := os.ReadFile(directory + filename)
+	if err != nil {
+		return response404
+	}
+	response := fmt.Sprintf(
+		"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s",
+		len(contents),
+		contents,
+	)
+	return []byte(response)
+}
+
 func buildResponse(body string) []byte {
 	response := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
 	return []byte(response)
@@ -102,6 +124,8 @@ func hundleConnection(conn net.Conn) {
 		conn.Write(buildResponse(str))
 	} else if str, ok := isUserAgent(req); ok {
 		conn.Write(buildResponse(str))
+	} else if filename, ok := isFile(req); ok {
+		conn.Write(buildFileResponse(filename))
 	} else if isRootPath(req) {
 		conn.Write(response200)
 	} else {
