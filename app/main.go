@@ -116,12 +116,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	for i := 0; i < 2; i++ {
+	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println("Error Accpeting the message")
 			os.Exit(1)
 		}
-		hundleConnection(conn)
+		go hundleConnection(conn)
 	}
 }
