@@ -95,11 +95,16 @@ func handleWriteFile(path string, content string) (string, bool) {
 
 func isFile(req []byte) (string, bool) {
 	r := requestParse(req)
-	directory := os.Args[2] // assuming you pass --directory flag like the challenge expects
 
 	if !strings.HasPrefix(r.Path, "/files/") {
 		return "", false
 	}
+
+	if len(os.Args) < 3 {
+		return "", false
+	}
+
+	directory := os.Args[2]
 
 	filename := strings.TrimPrefix(r.Path, "/files/")
 	fullPath := directory + filename
