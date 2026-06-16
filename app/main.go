@@ -90,18 +90,28 @@ func handleWriteFile(path string, content string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return "POST", true
+	return "WRITE_OK", true
 }
 
 func isFile(req []byte) (string, bool) {
 	r := requestParse(req)
 	directory := os.Args[2] // assuming you pass --directory flag like the challenge expects
 
-	if strings.HasPrefix(r.Path, "/files/") && r.Method == "GET" {
-		return strings.TrimPrefix(r.Path, "/files/"), true
-	} else if strings.HasPrefix(r.Path, "/files/") && r.Method == "POST" {
-		return handleWriteFile(directory, r.Body)
+	if !strings.HasPrefix(r.Path, "/files/") {
+		return "", false
 	}
+
+	filename := strings.TrimPrefix(r.Path, "/files/")
+	fullPath := directory + filename
+
+	if r.Method == "GET" {
+		return filename, true
+	}
+
+	if r.Method == "POST" {
+		return handleWriteFile(fullPath, r.Body)
+	}
+
 	return "", false
 }
 
@@ -137,11 +147,11 @@ func hundleConnection(conn net.Conn) {
 		conn.Write(buildResponse(str))
 	} else if str, ok := isUserAgent(req); ok {
 		conn.Write(buildResponse(str))
-	} else if filename, ok := isFile(req); ok {
-		if str == "POST" {
+	} else if result, ok := isFile(req); ok {
+		if result == "WRITE_OK" {
 			conn.Write(response201)
 		} else {
-			conn.Write(buildFileResponse(filename))
+			conn.Write(buildFileResponse(result))
 		}
 	} else if isRootPath(req) {
 		conn.Write(response200)
