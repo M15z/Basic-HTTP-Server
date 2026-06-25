@@ -14,6 +14,16 @@ type Context struct {
 	Params map[string]string
 }
 
+type APIError struct {
+	StatusCode int
+	Message    string
+	Err        error
+}
+
+func (e *APIError) Error() string {
+	return e.Message
+}
+
 func (c *Context) Param(key string) string {
 	return c.Params[key]
 }
@@ -38,10 +48,8 @@ var statusText = map[int]string{
 	404: "Not Found",
 }
 
-type APIError struct {
-	StatusCode int
-	Message    string
-	Err        error
+func NewAPIError(Status int, message string, cause error) *APIError {
+	return &APIError{StatusCode: Status, Message: message, Err: cause}
 }
 
 func (res Response) Bytes() []byte {
@@ -69,7 +77,7 @@ func (res Response) Bytes() []byte {
 	return append([]byte(sb.String()), res.Body...)
 }
 
-type HandlerFunc func(ctx *Context) Response
+type HandlerFunc func(ctx *Context) (Response, error)
 type Middleware func(next HandlerFunc) HandlerFunc
 
 func Chain(handler HandlerFunc, middlewares ...Middleware) HandlerFunc {
@@ -81,29 +89,47 @@ func Chain(handler HandlerFunc, middlewares ...Middleware) HandlerFunc {
 }
 
 func NoOpMiddleware(next HandlerFunc) HandlerFunc {
-	return func(ctx *Context) Response {
+	return func(ctx *Context) (Response, error) {
 		return next(ctx)
 	}
 }
 
 func LogMiddleware(next HandlerFunc) HandlerFunc {
-	return func(ctx *Context) Response {
+	return func(ctx *Context) (Response, error) {
 		start := time.Now()
-		res := next(ctx)
+		res, err := next(ctx)
 		duration := time.Since(start)
 
 		fmt.Printf("method=%s path=%s status=%d duration=%s\n",
 			ctx.Req.Method, ctx.Req.Path, res.StatusCode, duration)
-		return res
+		return res, err
+	}
+}
+
+func ErrorHandlingMiddleware(next HandlerFunc) HandlerFunc {
+	return func(ctx *Context) (Response, error) {
+		res, err := next(ctx)
+		if err == nil {
+			return res, nil
+		}
+
+		apiErr, ok := err.(*APIError)
+		if !ok {
+			apiErr = NewAPIError(500, "internal error", err)
+		}
+
+		fmt.Printf("level=ERROR method=%s path=%s status=%d message=%q cause=%v\n",
+			ctx.Req.Method, ctx.Req.Path, apiErr.StatusCode, apiErr.Message, apiErr.Err)
+
+		return EmptyResponse(apiErr.StatusCode), nil
 	}
 }
 
 func RecoverMiddleware(next HandlerFunc) HandlerFunc {
-	return func(ctx *Context) (res Response) {
+	return func(ctx *Context) (res Response, err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Println("recovered from panic:", r)
-				res = EmptyResponse(500)
+				err = NewAPIError(500, "internal error", fmt.Errorf("%v", r))
 			}
 		}()
 		return next(ctx)
@@ -253,66 +279,64 @@ func handleWriteFile(path string, content string) bool {
 
 var router = NewRouter()
 
-func handleEcho(ctx *Context) Response {
-	return TextResponse(200, ctx.Param("str"))
+func handleEcho(ctx *Context) (Response, error) {
+	return TextResponse(200, ctx.Param("str")), nil
 }
 
-func handleUserAgent(ctx *Context) Response {
-	return TextResponse(200, ctx.Req.Headers["User-Agent"])
+func handleUserAgent(ctx *Context) (Response, error) {
+	return TextResponse(200, ctx.Req.Headers["User-Agent"]), nil
 }
 
-func handleFileGet(ctx *Context) Response {
+func handleFileGet(ctx *Context) (Response, error) {
 	if len(os.Args) < 3 {
-		return EmptyResponse(404)
+		return Response{}, NewAPIError(404, "directory not configured", nil)
 	}
 
 	directory := os.Args[2]
 	content, err := os.ReadFile(directory + ctx.Param("filename"))
 	if err != nil {
-		return EmptyResponse(404)
+		return Response{}, NewAPIError(404, "File not found", nil)
 	}
 
-	return FileResponse(200, content)
+	return FileResponse(200, content), nil
 }
 
-func handleFilePost(ctx *Context) Response {
+func handleFilePost(ctx *Context) (Response, error) {
 	if len(os.Args) < 3 {
-		return EmptyResponse(404)
+		return Response{}, NewAPIError(404, "directory not configured", nil)
 	}
 	directory := os.Args[2]
 	fullPath := directory + ctx.Param("filename")
 
 	if !handleWriteFile(fullPath, ctx.Req.Body) {
-		return EmptyResponse(404)
+		return Response{}, NewAPIError(404, "File cannot created , Permission pervilage", nil)
 	}
 
-	return EmptyResponse(201)
+	return EmptyResponse(201), nil
 }
 
-func handleId(ctx *Context) Response {
-	return TextResponse(200, "user id: "+ctx.Param("id"))
+func handleId(ctx *Context) (Response, error) {
+	return TextResponse(200, "user id: "+ctx.Param("id")), nil
 }
 
-func handleRoot(ctx *Context) Response {
-	return EmptyResponse(200)
+func handleRoot(ctx *Context) (Response, error) {
+	return EmptyResponse(200), nil
 }
 
-func handlePanic(ctx *Context) Response {
+func handlePanic(ctx *Context) (Response, error) {
 	var m map[string]string
 	m["this"] = "panics" // write to nil map — guaranteed panic
-	return EmptyResponse(200)
+	return EmptyResponse(200), nil
 }
 
 func init() {
 	router.GET("/", handleRoot)
-	router.GET("/echo/{str}", Chain(handleEcho, LogMiddleware, RecoverMiddleware))
+	router.GET("/echo/{str}", Chain(handleEcho, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
 	router.GET("/user-agent", handleUserAgent)
-	router.GET("/files/{filename}", handleFileGet)
-	router.POST("/files/{filename}", handleFilePost)
-	router.GET("/users/{id}", Chain(handleId, NoOpMiddleware))
-
-	//test Panic
-	router.GET("/panic", Chain(handlePanic, LogMiddleware, RecoverMiddleware))
+	router.GET("/files/{filename}", Chain(handleFileGet, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+	router.POST("/files/{filename}", Chain(handleFilePost, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+	router.GET("/users/{id}", Chain(handleId, ErrorHandlingMiddleware, NoOpMiddleware))
+	router.GET("/panic", Chain(handlePanic, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
 }
 
 func hundleConnection(conn net.Conn) {
@@ -328,7 +352,8 @@ func hundleConnection(conn net.Conn) {
 
 	if handler, params, ok := router.Lookup(req.Method, req.Path); ok {
 		ctx := &Context{Req: req, Params: params}
-		conn.Write(handler(ctx).Bytes())
+		res, _ := handler(ctx)
+		conn.Write(res.Bytes())
 		return
 	}
 
