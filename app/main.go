@@ -1,11 +1,15 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,10 +46,15 @@ type Response struct {
 	Body       []byte
 }
 
+type App struct {
+	FileDirectory string
+}
+
 var statusText = map[int]string{
 	200: "OK",
 	201: "Created",
 	404: "Not Found",
+	400: "invalid input",
 }
 
 func NewAPIError(Status int, message string, cause error) *APIError {
@@ -146,6 +155,12 @@ type Router struct {
 	routes []Route
 }
 
+type Config struct {
+	Host          string
+	Port          int
+	FileDirectory string
+}
+
 func TextResponse(status int, body string) Response {
 	return Response{
 		StatusCode: status,
@@ -170,6 +185,21 @@ func NewRouter() *Router {
 	return &Router{
 		routes: []Route{},
 	}
+}
+
+func LoadConfig() Config {
+	host := flag.String("host", "0.0.0.0", "host to listen on")
+	port := flag.Int("port", 4221, "port to listen")
+	dir := flag.String("directory", "", "file directory")
+
+	flag.Parse()
+
+	return Config{
+		Host:          *host,
+		Port:          *port,
+		FileDirectory: *dir,
+	}
+
 }
 
 func (r *Router) Handle(method, pattern string, handler HandlerFunc) {
@@ -219,14 +249,7 @@ func (r *Router) Lookup(method, path string) (HandlerFunc, map[string]string, bo
 }
 
 const (
-	host       = "0.0.0.0:4221"
 	bufferSize = 1024
-)
-
-var (
-	response200 = []byte("HTTP/1.1 200 OK\r\n\r\n")
-	response404 = []byte("HTTP/1.1 404 Not Found\r\n\r\n")
-	response201 = []byte("HTTP/1.1 201 Created\r\n\r\n")
 )
 
 func ReadRequest(conn net.Conn) ([]byte, error) {
@@ -287,12 +310,8 @@ func handleUserAgent(ctx *Context) (Response, error) {
 	return TextResponse(200, ctx.Req.Headers["User-Agent"]), nil
 }
 
-func handleFileGet(ctx *Context) (Response, error) {
-	if len(os.Args) < 3 {
-		return Response{}, NewAPIError(404, "directory not configured", nil)
-	}
-
-	directory := os.Args[2]
+func (a *App) handleFileGet(ctx *Context) (Response, error) {
+	directory := a.FileDirectory
 	content, err := os.ReadFile(directory + ctx.Param("filename"))
 	if err != nil {
 		return Response{}, NewAPIError(404, "File not found", nil)
@@ -301,11 +320,8 @@ func handleFileGet(ctx *Context) (Response, error) {
 	return FileResponse(200, content), nil
 }
 
-func handleFilePost(ctx *Context) (Response, error) {
-	if len(os.Args) < 3 {
-		return Response{}, NewAPIError(404, "directory not configured", nil)
-	}
-	directory := os.Args[2]
+func (a *App) handleFilePost(ctx *Context) (Response, error) {
+	directory := a.FileDirectory
 	fullPath := directory + ctx.Param("filename")
 
 	if !handleWriteFile(fullPath, ctx.Req.Body) {
@@ -329,17 +345,13 @@ func handlePanic(ctx *Context) (Response, error) {
 	return EmptyResponse(200), nil
 }
 
-func init() {
-	router.GET("/", handleRoot)
-	router.GET("/echo/{str}", Chain(handleEcho, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
-	router.GET("/user-agent", handleUserAgent)
-	router.GET("/files/{filename}", Chain(handleFileGet, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
-	router.POST("/files/{filename}", Chain(handleFilePost, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
-	router.GET("/users/{id}", Chain(handleId, ErrorHandlingMiddleware, NoOpMiddleware))
-	router.GET("/panic", Chain(handlePanic, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+func handleSlow(ctx *Context) (Response, error) {
+	time.Sleep(10 * time.Second)
+	return TextResponse(200, "slow response"), nil
 }
 
-func hundleConnection(conn net.Conn) {
+func hundleConnection(conn net.Conn, wg *sync.WaitGroup) {
+	defer wg.Done()
 	defer conn.Close()
 
 	request, err := ReadRequest(conn)
@@ -349,7 +361,6 @@ func hundleConnection(conn net.Conn) {
 	}
 
 	req := requestParse(request)
-
 	if handler, params, ok := router.Lookup(req.Method, req.Path); ok {
 		ctx := &Context{Req: req, Params: params}
 		res, _ := handler(ctx)
@@ -360,19 +371,80 @@ func hundleConnection(conn net.Conn) {
 	conn.Write(EmptyResponse(404).Bytes())
 }
 
+func registerAllRoutes(conf Config) {
+	app := &App{FileDirectory: conf.FileDirectory}
+
+	router.GET("/files/{filename}", Chain(app.handleFileGet, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+
+	router.POST("/files/{filename}", Chain(app.handleFilePost, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+
+	router.GET("/slow", Chain(handleSlow, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+	router.GET("/", handleRoot)
+	router.GET("/echo/{str}", Chain(handleEcho, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+	router.GET("/user-agent", handleUserAgent)
+	router.GET("/users/{id}", Chain(handleId, ErrorHandlingMiddleware, NoOpMiddleware))
+	router.GET("/panic", Chain(handlePanic, ErrorHandlingMiddleware, LogMiddleware, RecoverMiddleware))
+}
+
 func main() {
-	listener, err := net.Listen("tcp", host)
+	config := LoadConfig()
+	if config.FileDirectory == "" {
+		fmt.Println("usage: server --directory <path>")
+		os.Exit(1)
+	}
+
+	registerAllRoutes(config)
+
+	addr := fmt.Sprintf("%s:%d", config.Host, config.Port)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Println("failed to bind a port 4221")
 		os.Exit(1)
 	}
 
+	var wg sync.WaitGroup
+
+	// Listen for SIGINT (Ctrl+C) or SIGTERM (Kubernetes)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	shutdown := make(chan struct{}) // NEW — signals main to wait
+
+	// Shutdown goroutine — waits for signal, then drains
+	go func() {
+		sig := <-quit
+		fmt.Printf("signal=%s shutting down...\n", sig)
+
+		// Stop accepting new connections
+		listener.Close()
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			fmt.Println("shutdown clean")
+			time.Sleep(100 * time.Millisecond) // let stdout flush
+		case <-time.After(30 * time.Second):
+			fmt.Println("shutdown timeout — forcing exit")
+			time.Sleep(100 * time.Millisecond)
+		}
+		close(shutdown) // NEW — tell main we're done
+	}()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error Accpeting the message")
-			os.Exit(1)
+			// listener.Close() causes Accept() to return an error —
+			// this is the expected signal that we're shutting down
+			fmt.Println("listener closed, stopping accept loop")
+			break // NEW — break instead of return, so we reach the wait below
 		}
-		go hundleConnection(conn)
+		wg.Add(1)
+		go hundleConnection(conn, &wg)
 	}
+
+	<-shutdown // NEW — block here until shutdown goroutine finishes
 }
